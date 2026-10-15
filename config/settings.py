@@ -329,9 +329,9 @@ DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', '"Le Grand Salon Divin
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'detcjqnlr'),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '218148834422936'),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'lLqK-M8_DPPiCrM_2ReBRwN7Thg')
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'ditufz08v'),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '823629719128558'),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', '-5WvX0tr1D3CEvRJId32_2heP0o')
 }
 
 # Persistent Cloudinary media storage in production
