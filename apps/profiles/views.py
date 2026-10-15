@@ -36,9 +36,26 @@ class ProfileMediaViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         profile, created = UserProfile.objects.get_or_create(user=self.request.user)
-        # Si c'est le premier média, le marquer comme primary
-        is_primary = not ProfileMedia.objects.filter(profile=profile).exists()
-        serializer.save(profile=profile, is_primary=is_primary)
+        is_primary = not ProfileMedia.objects.filter(profile=profile).exists() or self.request.data.get('is_primary') in [True, 'true', '1']
+        media = serializer.save(profile=profile, is_primary=is_primary)
+        if is_primary or not profile.avatar:
+            profile.avatar = media.file
+            profile.save()
+
+    def perform_destroy(self, instance):
+        profile = instance.profile
+        was_primary = instance.is_primary
+        instance.delete()
+        if was_primary:
+            next_media = ProfileMedia.objects.filter(profile=profile).first()
+            if next_media:
+                next_media.is_primary = True
+                next_media.save()
+                profile.avatar = next_media.file
+            else:
+                profile.avatar = None
+            profile.save()
+
 
 class KYCSubmissionView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]

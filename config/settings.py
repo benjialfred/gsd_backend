@@ -16,22 +16,20 @@ import os
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load environment variables depending on DJANGO_ENV
+# Load environment variables from .env and .env.{DJANGO_ENV}
 DJANGO_ENV = os.environ.get('DJANGO_ENV', 'development')
-env_file = BASE_DIR / f'.env.{DJANGO_ENV}'
-if env_file.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-    except ImportError:
-        # Fallback simple parser if python-dotenv is not installed
-        with open(env_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if '=' in line:
+for env_path in [BASE_DIR / '.env', BASE_DIR / f'.env.{DJANGO_ENV}']:
+    if env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(env_path)
+        except ImportError:
+            with open(env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
                         key, val = line.split('=', 1)
-                        os.environ[key.strip()] = val.strip()
+                        os.environ.setdefault(key.strip(), val.strip())
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-kdjf=wmdx8sx+r6^x81%m_ed*&yfmyemc1q7_2hrue=50+i2k(')
@@ -45,7 +43,6 @@ ALLOWED_HOSTS = [host.strip() for host in os.environ.get('ALLOWED_HOSTS', 'local
 # Application definition
 
 INSTALLED_APPS = [
-    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -81,6 +78,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    'django.middleware.gzip.GZipMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -110,24 +108,55 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {
-            "hosts": [os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1')],
-        },
-    },
-}
+def _check_redis_alive():
+    redis_url = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1')
+    try:
+        import socket
+        from urllib.parse import urlparse
+        parsed = urlparse(redis_url)
+        host = parsed.hostname or '127.0.0.1'
+        port = parsed.port or 6379
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.15)
+        s.connect((host, port))
+        s.close()
+        return True
+    except Exception:
+        return False
 
-CACHES = {
-    "default": {
-        "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+REDIS_IS_AVAILABLE = _check_redis_alive()
+
+if REDIS_IS_AVAILABLE:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                "hosts": [os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1')],
+            },
+        },
+    }
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "IGNORE_EXCEPTIONS": True,
+            }
         }
     }
-}
+else:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "gsd-local-cache",
+        }
+    }
 
 
 # Database
@@ -159,8 +188,19 @@ LOGGING = {
 
 import urllib.parse as urlparse
 
+def _resolve_db_host(hostname):
+    """
+    Directly maps db.dbhost.app to its verified static IP (46.62.157.237)
+    to completely avoid Windows DNS hangs (30s+ timeouts) and eliminate:
+    django.db.utils.OperationalError: could not translate host name
+    """
+    if hostname == 'db.dbhost.app':
+        return '46.62.157.237'
+    return hostname
+
 db_url = os.environ.get('DATABASE_URL', "postgresql://u7y3d35_gsd:OaljeVQSaOJnziMZ87UrveiRZg-avbuflA-JJIdIFkE@db.dbhost.app:6432/u7y3d35_gsd")
 url = urlparse.urlparse(db_url)
+resolved_db_host = _resolve_db_host(url.hostname)
 
 DATABASES = {
     'default': {
@@ -168,10 +208,17 @@ DATABASES = {
         'NAME': url.path[1:],
         'USER': url.username,
         'PASSWORD': url.password,
-        'HOST': url.hostname,
+        'HOST': resolved_db_host,
         'PORT': url.port or 5432,
+        'CONN_MAX_AGE': 600,
+        'CONN_HEALTH_CHECKS': True,
         'OPTIONS': {
             'sslmode': 'require',
+            'connect_timeout': 35,
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 5,
         }
     }
 }
@@ -215,7 +262,19 @@ STATIC_URL = 'static/'
 
 AUTH_USER_MODEL = 'users.User'
 
-CORS_ALLOW_ALL_ORIGINS = True # Pour dev local
+AUTHENTICATION_BACKENDS = [
+    'authentication.backends.EmailOrUsernameBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('true', '1', 't')
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173').split(',') if origin.strip()]
+
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'cache-control',
+    'x-requested-with',
+]
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -233,8 +292,19 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'no-reply@gsd.com'
+# Configuration de l'envoi d'e-mails (Gmail SMTP)
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_USE_SSL = False
+EMAIL_TIMEOUT = 5 # Timeout très court pour ne pas bloquer le frontend
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', 'benjaminadzessa@gmail.com')
+# On retire les espaces du mot de passe d'application s'il y en a
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', 'pvttvhnkgtabburs')
+
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', '"Le Grand Salon Divin" <benjaminadzessa@gmail.com>')
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'detcjqnlr'),
@@ -242,7 +312,12 @@ CLOUDINARY_STORAGE = {
     'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'lLqK-M8_DPPiCrM_2ReBRwN7Thg')
 }
 
-DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+PROFILE_MEDIA_ROOT = os.path.join(BASE_DIR, 'profile_media')
 
-
-
+# NelsiusPay Payment Gateway
+NELSIUS_SECRET_KEY = os.environ.get('NELSIUS_SECRET_KEY', '')
+NELSIUS_PUBLIC_KEY = os.environ.get('NELSIUS_PUBLIC_KEY', '')
+NELSIUS_API_KEY = os.environ.get('NELSIUS_API_KEY', NELSIUS_SECRET_KEY)
+NELSIUS_BASE_URL = os.environ.get('NELSIUS_BASE_URL', 'https://api.nelsiuspay.com/api/v1')

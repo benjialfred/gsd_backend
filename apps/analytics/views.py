@@ -21,6 +21,9 @@ class EventTrackView(views.APIView):
         if not event_type:
             return Response({'error': 'event_type is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not isinstance(metadata, dict):
+            metadata = {}
+
         if step is not None:
             metadata['step'] = step
 

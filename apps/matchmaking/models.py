@@ -6,6 +6,8 @@ class Match(models.Model):
     user2 = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='matches_as_user2')
     is_accepted = models.BooleanField(default=False)
     is_rejected = models.BooleanField(default=False)
+    is_blocked = models.BooleanField(default=False)
+    blocked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='blocked_matches')
     
     # Préparation du Chat Sprint 5
     conversation_id = models.CharField(max_length=255, null=True, blank=True)
@@ -65,12 +67,62 @@ class SwipeAction(models.Model):
 class Message(models.Model):
     match = models.ForeignKey(Match, on_delete=models.CASCADE, related_name='messages')
     sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    content = models.TextField()
+    content = models.TextField(blank=True, default='')
+    image = models.ImageField(upload_to='chat_images/', null=True, blank=True)
+    audio = models.FileField(upload_to='chat_audio/', null=True, blank=True)
+    duration = models.IntegerField(default=0, help_text="Durée en secondes pour note vocale")
+    reactions = models.JSONField(default=dict, blank=True, help_text="Dictionnaire des réactions {emoji: [user_ids]}")
+    is_deleted = models.BooleanField(default=False)
     timestamp = models.DateTimeField(auto_now_add=True)
     is_read = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Message de {self.sender.username} - {self.timestamp}"
+
+class UserReport(models.Model):
+    REPORT_REASONS = (
+        ('INAPPROPRIATE_BEHAVIOR', 'Comportement déplacé ou irrespectueux'),
+        ('HARASSMENT', 'Harcèlement ou insistance'),
+        ('FAKE_PROFILE', 'Profil trompeur ou usurpation'),
+        ('FINANCIAL_REQUEST', 'Demande d\'argent ou escroquerie'),
+        ('OTHER', 'Autre raison'),
+    )
+    reporter = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reports_sent')
+    reported_user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='reports_received')
+    match = models.ForeignKey(Match, on_delete=models.SET_NULL, null=True, blank=True, related_name='reports')
+    reason = models.CharField(max_length=50, choices=REPORT_REASONS, default='INAPPROPRIATE_BEHAVIOR')
+    details = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_resolved = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"Signalement de {self.reporter.username} -> {self.reported_user.username} ({self.reason})"
+
+class CallSession(models.Model):
+    CALL_TYPES = (
+        ('AUDIO', 'Audio'),
+        ('VIDEO', 'Vidéo'),
+    )
+    CALL_STATUSES = (
+        ('RINGING', 'En cours de sonnerie'),
+        ('ACCEPTED', 'En cours d\'appel'),
+        ('REJECTED', 'Refusé'),
+        ('ENDED', 'Terminé'),
+        ('MISSED', 'Manqué'),
+    )
+    match = models.ForeignKey(Match, on_delete=models.CASCADE, related_name='calls')
+    caller = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='outgoing_calls')
+    receiver = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='incoming_calls')
+    call_type = models.CharField(max_length=10, choices=CALL_TYPES, default='AUDIO')
+    status = models.CharField(max_length=20, choices=CALL_STATUSES, default='RINGING')
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    duration_seconds = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"Appel {self.call_type} ({self.status}) de {self.caller.username} à {self.receiver.username}"
+
+
 
 # ---------------------------------------------------------
 # Préférences de Matchmaking
