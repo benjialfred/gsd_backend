@@ -37,7 +37,19 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-kdjf=wmdx8sx+r6^x81%m
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 't')
 
-ALLOWED_HOSTS = [host.strip() for host in os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host.strip()]
+ALLOWED_HOSTS = [
+    host.strip() for host in os.environ.get(
+        'ALLOWED_HOSTS', 
+        'localhost,127.0.0.1,.onrender.com,.railway.app,.herokuapp.com'
+    ).split(',') if host.strip()
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip() for origin in os.environ.get(
+        'CSRF_TRUSTED_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173,https://*.vercel.app,https://*.onrender.com,https://*.railway.app'
+    ).split(',') if origin.strip()
+]
 
 
 # Application definition
@@ -268,7 +280,16 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() in ('true', '1', 't')
-CORS_ALLOWED_ORIGINS = [origin.strip() for origin in os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173').split(',') if origin.strip()]
+CORS_ALLOWED_ORIGINS = [
+    origin.strip() for origin in os.environ.get(
+        'CORS_ALLOWED_ORIGINS', 
+        'http://localhost:5173,http://127.0.0.1:5173'
+    ).split(',') if origin.strip()
+]
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.vercel\.app$",
+]
+CORS_ALLOW_CREDENTIALS = True
 
 from corsheaders.defaults import default_headers
 CORS_ALLOW_HEADERS = list(default_headers) + [
@@ -311,6 +332,10 @@ CLOUDINARY_STORAGE = {
     'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '218148834422936'),
     'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'lLqK-M8_DPPiCrM_2ReBRwN7Thg')
 }
+
+# Persistent Cloudinary media storage in production
+if os.environ.get('USE_CLOUDINARY', 'True').lower() in ('true', '1', 't') and CLOUDINARY_STORAGE.get('API_SECRET'):
+    DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
