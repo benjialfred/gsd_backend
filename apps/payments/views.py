@@ -13,6 +13,74 @@ from subscriptions.models import SubscriptionPlan, UserSubscription
 logger = logging.getLogger(__name__)
 
 
+def _activate_purchased_service(tx: PaymentTransaction, payload=None):
+    """
+    Active automatiquement le service acquis selon son but :
+    - SUBSCRIPTION : Active l'abonnement du membre avec calcul d'échéance
+    - EVENT_TICKET : Valide et émet le billet officiel d'événement avec QR Code
+    - COACHING     : Confirme le rendez-vous d'accompagnement pastoral
+    """
+    tx.status = 'SUCCESS'
+    tx.paid_at = timezone.now()
+    if payload:
+        tx.payment_metadata["webhook_payload"] = payload
+    tx.save()
+
+    # 1. Formule d'Abonnement
+    if tx.purpose == 'SUBSCRIPTION':
+        try:
+            from subscriptions.models import SubscriptionPlan, UserSubscription
+            plan = SubscriptionPlan.objects.get(id=tx.related_id)
+            sub, _ = UserSubscription.objects.get_or_create(user=tx.user, defaults={'plan': plan})
+            sub.plan = plan
+            sub.status = 'ACTIVE'
+            sub.start_date = timezone.now()
+            if plan.duration_days > 0:
+                sub.end_date = timezone.now() + timedelta(days=plan.duration_days)
+            else:
+                sub.end_date = None
+            sub.last_payment_reference = tx.reference
+            sub.save()
+            logger.info(f"[NelsiusPay] Formule {plan.name} activée pour {tx.user.email} jusqu'au {sub.end_date}")
+        except Exception as e:
+            logger.error(f"[NelsiusPay] Erreur activation abonnement: {str(e)}")
+
+    # 2. Billet de Gala / Événement
+    elif tx.purpose in ['EVENT_TICKET', 'EVENT']:
+        try:
+            from events.models import TicketTier, EventRegistration
+            tier = TicketTier.objects.select_related('event').get(id=tx.related_id)
+            reg, created = EventRegistration.objects.get_or_create(
+                user=tx.user,
+                event=tier.event,
+                ticket_tier=tier,
+                defaults={
+                    'guest_name': tx.customer_name or f"{tx.user.first_name} {tx.user.last_name}".strip() or tx.user.username,
+                    'guest_email': tx.customer_email or tx.user.email,
+                    'guest_phone': tx.customer_phone or '',
+                    'status': 'CONFIRMED',
+                    'notes': f"Payé via NelsiusPay (Réf: {tx.reference})"
+                }
+            )
+            if not created and reg.status != 'CONFIRMED':
+                reg.status = 'CONFIRMED'
+                reg.save(update_fields=['status'])
+            logger.info(f"[NelsiusPay] Billet {tier.name} ({tier.event.title}) confirmé pour {tx.user.email}")
+        except Exception as e:
+            logger.error(f"[NelsiusPay] Erreur confirmation billet gala: {str(e)}")
+
+    # 3. Rendez-vous Pastoral & Coaching
+    elif tx.purpose == 'COACHING':
+        try:
+            from coaching.models import Appointment
+            appointment = Appointment.objects.get(id=tx.related_id)
+            appointment.status = 'CONFIRMED'
+            appointment.save(update_fields=['status'])
+            logger.info(f"[NelsiusPay] Rendez-vous de coaching #{appointment.id} confirmé pour {tx.user.email}")
+        except Exception as e:
+            logger.error(f"[NelsiusPay] Erreur confirmation rendez-vous coaching: {str(e)}")
+
+
 class PaymentViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = PaymentTransactionSerializer
@@ -28,7 +96,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
     def confirm(self, request):
         """
         Confirme et finalise une transaction de paiement après retour du guichet NelsiusPay.
-        Active automatiquement l'abonnement ou le service acheté.
+        Active automatiquement l'abonnement, le billet ou le rendez-vous acheté.
         """
         ref = request.data.get('reference')
         if not ref:
@@ -49,30 +117,9 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 "transaction": PaymentTransactionSerializer(tx).data
             })
 
-        # Interrogation de NelsiusPay si disponible
+        # Interrogation optionnelle de vérification NelsiusPay
         verify_res = nelsius_client.verify_payment(tx.reference)
-        # Si NelsiusPay confirme le paiement ou si la confirmation directe client est autorisée
-        tx.status = 'SUCCESS'
-        tx.paid_at = timezone.now()
-        tx.save(update_fields=['status', 'paid_at'])
-
-        # Traitement spécifique selon le but (Abonnement, Coaching, Gala)
-        if tx.purpose == 'SUBSCRIPTION':
-            try:
-                plan = SubscriptionPlan.objects.get(id=tx.related_id)
-                sub, _ = UserSubscription.objects.get_or_create(user=tx.user, defaults={'plan': plan})
-                sub.plan = plan
-                sub.status = 'ACTIVE'
-                sub.start_date = timezone.now()
-                if plan.duration_days > 0:
-                    sub.end_date = timezone.now() + timedelta(days=plan.duration_days)
-                else:
-                    sub.end_date = None
-                sub.last_payment_reference = tx.reference
-                sub.save()
-                logger.info(f"[Abonnement] Formule {plan.name} activée pour {tx.user.email} jusqu'au {sub.end_date}")
-            except Exception as e:
-                logger.error(f"[Abonnement] Erreur activation formule: {str(e)}")
+        _activate_purchased_service(tx)
 
         return Response({
             "success": True,
@@ -83,11 +130,11 @@ class PaymentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])
     def webhook(self, request):
         """
-        Point d'entrée Webhook NelsiusPay IPN.
-        Traite les notifications asynchrones de paiement réussi de NelsiusPay.
+        Point d'entrée Webhook NelsiusPay IPN officiel.
+        Traite en temps réel les notifications asynchrones de paiement réussi (Mobile Money, Carte).
         """
         payload = request.data
-        logger.info(f"[NelsiusPay Webhook] Données reçues: {payload}")
+        logger.info(f"[NelsiusPay Webhook IPN] Données reçues: {payload}")
 
         reference = (
             payload.get('reference') 
@@ -108,23 +155,12 @@ class PaymentViewSet(viewsets.ModelViewSet):
             logger.warning(f"[NelsiusPay Webhook] Transaction introuvable pour référence {reference}")
             return Response({"error": "Transaction introuvable"}, status=status.HTTP_404_NOT_FOUND)
 
-        if status_val in ['SUCCESS', 'PAID', 'COMPLETED', 'success', 'paid']:
-            tx.status = 'SUCCESS'
-            tx.paid_at = timezone.now()
-            tx.payment_metadata["webhook_payload"] = payload
-            tx.save()
-
-            if tx.purpose == 'SUBSCRIPTION':
-                plan = SubscriptionPlan.objects.get(id=tx.related_id)
-                sub, _ = UserSubscription.objects.get_or_create(user=tx.user, defaults={'plan': plan})
-                sub.plan = plan
-                sub.status = 'ACTIVE'
-                sub.start_date = timezone.now()
-                if plan.duration_days > 0:
-                    sub.end_date = timezone.now() + timedelta(days=plan.duration_days)
-                else:
-                    sub.end_date = None
-                sub.last_payment_reference = tx.reference
-                sub.save()
+        if status_val in ['SUCCESS', 'PAID', 'COMPLETED', 'success', 'paid', True]:
+            _activate_purchased_service(tx, payload=payload)
+            return Response({
+                "status": "success",
+                "message": "Paiement NelsiusPay validé et service activé.",
+                "reference": reference
+            }, status=status.HTTP_200_OK)
 
         return Response({"status": "received", "reference": reference})
